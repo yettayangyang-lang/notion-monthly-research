@@ -19,14 +19,18 @@ from openai import OpenAI
 # Notion
 #   NOTION_TOKEN=<你的 Notion 集成密钥>
 #   PAGE_ID=<要写入的页面或块的 block_id>
-# 关键词（可选）
+# arXiv 关键词（可选）
 #   QUERY_KEYWORDS="kidney, C3, macrophage"
 
 DEEPSEEK_API_KEY = os.environ.get("OPENAI_API_KEY")
 DEEPSEEK_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com")
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 PAGE_ID = os.environ.get("PAGE_ID")
-QUERY_KEYWORDS = os.environ.get("QUERY_KEYWORDS", "kidney, C3, macrophage")
+QUERY_KEYWORDS = os.environ.get("QUERY_KEYWORDS","Large model fine-tuning, multimodal decoupling, multimodal alignment, multimodal enhancement")
+CCF_A_VENUES = os.environ.get(
+    "CCF_A_VENUES",
+    "NeurIPS, ICML, ICLR, CVPR, ICCV, ECCV, ACL, EMNLP, NAACL, AAAI, IJCAI, KDD, WWW, SIGIR"
+)
 
 if not DEEPSEEK_API_KEY:
     print("ERROR: 请设置环境变量 OPENAI_API_KEY 为你的 DeepSeek API Key")
@@ -43,7 +47,6 @@ client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 today = datetime.today()
 today_fmt = today.strftime("%Y年%m月")
 past_date = (today - timedelta(days=30)).strftime("%Y-%m-%d")
-today_date_str = today.strftime("%Y-%m-%d")
 
 
 # =========================
@@ -147,136 +150,83 @@ def notion_append_blocks(page_or_block_id: str, blocks: List[Dict]):
 # =========================
 # 业务逻辑
 # =========================
-def fetch_medrxiv_papers(max_results=12) -> List[str]:
-    """
-    抓取 medRxiv 最近 30 天内的论文，并按关键词在标题/摘要中过滤。
-    medRxiv 的公开 API（api.biorxiv.org）本身不支持关键词检索，
-    只能按日期区间分页拉取，再在本地做关键词匹配。
-    """
-    keywords = [kw.strip().lower() for kw in QUERY_KEYWORDS.split(",") if kw.strip()]
-    base_url = f"https://api.biorxiv.org/details/medrxiv/{past_date}/{today_date_str}"
+def fetch_arxiv_papers(max_results=10) -> List[str]:
+    """抓取 arXiv 最近论文（按提交时间倒序）。返回 Markdown 列表行。"""
+    base_url = "http://export.arxiv.org/api/query"
+    keywords = [kw.strip() for kw in QUERY_KEYWORDS.split(",") if kw.strip()]
+    raw_query = " OR ".join(keywords) if keywords else "medical imaging"
+    params = {
+        "search_query": f"all:{raw_query}",
+        "start": 0,
+        "max_results": max_results,
+        "sortBy": "submittedDate",
+        "sortOrder": "descending"
+    }
+    feed_url = f"{base_url}?{urlencode(params)}"
+    feed = feedparser.parse(feed_url)
 
-    papers: List[str] = []
-    cursor = 0
-    max_pages = 20  # 安全上限，避免无限翻页
+    papers = []
+    for entry in feed.entries:
+        title = entry.title.strip().replace("\n", " ")
+        date = entry.published.split("T")[0] if hasattr(entry, "published") else ""
+        link = entry.link
+        papers.append(f"- [{date}] {title} ({link})")
+    return papers
 
-    for _ in range(max_pages):
-        url = f"{base_url}/{cursor}"
+
+def fetch_ccf_a_papers(max_results_per_venue=3, max_total=12) -> List[str]:
+    """抓取 CCF-A 会议/期刊的最新论文（语义学者 API）。返回 Markdown 列表行。"""
+    venues = [venue.strip() for venue in CCF_A_VENUES.split(",") if venue.strip()]
+    results: List[str] = []
+    for venue in venues:
+        params = {
+            "query": f'venue:"{venue}"',
+            "limit": max_results_per_venue,
+            "fields": "title,venue,year,publicationDate,url"
+        }
         try:
-            res = requests.get(url, timeout=30)
+            res = requests.get(
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params=params,
+                timeout=30
+            )
             res.raise_for_status()
             data = res.json()
         except requests.RequestException as exc:
-            print(f"medRxiv fetch failed: {exc}")
-            break
+            print(f"CCF-A fetch failed for {venue}: {exc}")
+            continue
 
-        collection = data.get("collection", [])
-        if not collection:
-            break
+        for paper in data.get("data", []):
+            pub_date = paper.get("publicationDate") or ""
+            if pub_date and pub_date >= past_date:
+                title = (paper.get("title") or "").strip().replace("\n", " ")
+                link = paper.get("url") or ""
+                results.append(f"- [{pub_date}] {title} ({venue}) {link}".strip())
+            if len(results) >= max_total:
+                return results
 
-        for item in collection:
-            title = (item.get("title") or "").strip().replace("\n", " ")
-            abstract = (item.get("abstract") or "").lower()
-            title_lower = title.lower()
-            if keywords and not any(kw in title_lower or kw in abstract for kw in keywords):
-                continue
-            date = item.get("date", "")
-            doi = item.get("doi", "")
-            link = f"https://doi.org/{doi}" if doi else ""
-            papers.append(f"- [{date}] {title} ({link})")
-            if len(papers) >= max_results:
-                break
-
-        if len(papers) >= max_results:
-            break
-
-        cursor += len(collection)
-        messages = data.get("messages") or [{}]
-        try:
-            total_count = int(messages[0].get("total", 0))
-        except (ValueError, TypeError, IndexError):
-            total_count = 0
-        if cursor >= total_count:
-            break
-
-    if not papers:
-        papers.append("- （近30天未抓到相关 medRxiv 论文）")
-    return papers[:max_results]
+    if not results:
+        results.append("- （近30天未抓到相关 CCF-A 论文）")
+    return results[:max_total]
 
 
-def fetch_pubmed_papers(max_results=12) -> List[str]:
-    """抓取 PubMed 最近 30 天内匹配关键词的论文（NCBI E-utilities）。"""
-    keywords = [kw.strip() for kw in QUERY_KEYWORDS.split(",") if kw.strip()]
-    term = " AND ".join(keywords) if keywords else "kidney"
-
-    esearch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    esearch_params = {
-        "db": "pubmed",
-        "term": term,
-        "retmax": max_results,
-        "sort": "date",
-        "reldate": 30,
-        "datetype": "pdat",
-        "retmode": "json"
-    }
-    try:
-        res = requests.get(esearch_url, params=esearch_params, timeout=30)
-        res.raise_for_status()
-        id_list = res.json().get("esearchresult", {}).get("idlist", [])
-    except requests.RequestException as exc:
-        print(f"PubMed esearch failed: {exc}")
-        return ["- （PubMed 检索失败）"]
-
-    if not id_list:
-        return ["- （近30天未抓到相关 PubMed 论文）"]
-
-    esummary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    esummary_params = {
-        "db": "pubmed",
-        "id": ",".join(id_list),
-        "retmode": "json"
-    }
-
-    papers: List[str] = []
-    try:
-        res = requests.get(esummary_url, params=esummary_params, timeout=30)
-        res.raise_for_status()
-        result = res.json().get("result", {})
-        for pmid in result.get("uids", id_list):
-            item = result.get(pmid, {})
-            title = (item.get("title") or "").strip().replace("\n", " ")
-            date = item.get("pubdate", "")
-            link = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-            papers.append(f"- [{date}] {title} ({link})")
-    except requests.RequestException as exc:
-        print(f"PubMed esummary failed: {exc}")
-        return ["- （PubMed 摘要抓取失败）"]
-
-    if not papers:
-        papers.append("- （近30天未抓到相关 PubMed 论文）")
-    return papers[:max_results]
-
-
-def generate_summary_from_papers(
-    medrxiv_papers: List[str],
-    pubmed_papers: List[str]
-) -> str:
+def generate_summary_from_papers(arxiv_papers: List[str], ccf_a_papers: List[str]) -> str:
     """用 DeepSeek 生成 Markdown 总结（OpenAI 兼容 Chat Completions）"""
-    medrxiv_markdown = "\n".join(medrxiv_papers) if medrxiv_papers else "- （近30天未抓到相关 medRxiv 论文）"
-    pubmed_markdown = "\n".join(pubmed_papers) if pubmed_papers else "- （近30天未抓到相关 PubMed 论文）"
+    papers_markdown = "\n".join(arxiv_papers) if arxiv_papers else "- （近30天未抓到相关论文）"
+    ccf_a_markdown = "\n".join(ccf_a_papers) if ccf_a_papers else "- （近30天未抓到相关 CCF-A 论文）"
     prompt = f"""
-以下是近 30 天内与“{QUERY_KEYWORDS}”相关的 medRxiv 论文列表，以及 PubMed 论文列表，请根据它们总结当前该领域的关键趋势、热点方向和研究关注点。输出请使用 Markdown，并按以下格式：
+以下是近 30 天内与“{QUERY_KEYWORDS}”相关的 arXiv 论文列表，以及 CCF-A 会议/期刊的最新论文列表，请根据它们总结当前多模态解耦、融合、对比、增强研究以及大模型微调的关键趋势、热点方向和研究关注点。输出请使用 Markdown，并按以下格式：
 
-## {today_fmt} 研究热点论文总结
+## {today_fmt} 多模态研究热点论文总结
 
 ### 🔍 趋势概览
 （由模型生成的简洁要点，避免空话套话，尽量引用论文中的可验证信号）
 
-### 📄 medRxiv 论文列表
-{medrxiv_markdown}
+### 📄 arXiv 论文列表
+{papers_markdown}
 
-### 📄 PubMed 论文列表
-{pubmed_markdown}
+### 🏛️ CCF-A 最新论文
+{ccf_a_markdown}
 """.strip()
 
     # 轻量重试
@@ -285,7 +235,7 @@ def generate_summary_from_papers(
             resp = client.chat.completions.create(
                 model="deepseek-reasoner",  # 或 "deepseek-reasoner"
                 messages=[
-                    {"role": "system", "content": "你是一位专业的生物医学研究分析助手"},
+                    {"role": "system", "content": "你是一位专业的AI算法和大模型研究分析助手"},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.5
@@ -299,13 +249,13 @@ def generate_summary_from_papers(
 
 def main():
     print(f"Keywords: {QUERY_KEYWORDS}")
-    print("Fetching medRxiv...")
-    medrxiv_papers = fetch_medrxiv_papers(max_results=12)
-    print("Fetching PubMed...")
-    pubmed_papers = fetch_pubmed_papers(max_results=12)
+    print("Fetching arXiv...")
+    papers = fetch_arxiv_papers(max_results=12)
+    print("Fetching CCF-A papers...")
+    ccf_a_papers = fetch_ccf_a_papers(max_results_per_venue=3, max_total=12)
 
     print("Generating summary with DeepSeek...")
-    summary_md = generate_summary_from_papers(medrxiv_papers, pubmed_papers)
+    summary_md = generate_summary_from_papers(papers, ccf_a_papers)
     notion_blocks = markdown_to_notion_blocks(summary_md)
 
     print("Pushing to Notion...")
