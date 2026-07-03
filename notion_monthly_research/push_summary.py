@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import json
 import re
 import requests
 import feedparser
@@ -24,13 +23,18 @@ from openai import OpenAI
 
 DEEPSEEK_API_KEY = os.environ.get("OPENAI_API_KEY")
 DEEPSEEK_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 PAGE_ID = os.environ.get("PAGE_ID")
-QUERY_KEYWORDS = os.environ.get("QUERY_KEYWORDS","Large model fine-tuning, multimodal decoupling, multimodal alignment, multimodal enhancement")
+QUERY_KEYWORDS = (
+    os.environ.get("QUERY_KEYWORDS")
+    or "Large model fine-tuning, multimodal decoupling, multimodal alignment, multimodal enhancement"
+)
 CCF_A_VENUES = os.environ.get(
     "CCF_A_VENUES",
     "NeurIPS, ICML, ICLR, CVPR, ICCV, ECCV, ACL, EMNLP, NAACL, AAAI, IJCAI, KDD, WWW, SIGIR"
 )
+NOTION_BATCH_SIZE = 100
 
 if not DEEPSEEK_API_KEY:
     print("ERROR: 请设置环境变量 OPENAI_API_KEY 为你的 DeepSeek API Key")
@@ -132,19 +136,21 @@ def notion_append_blocks(page_or_block_id: str, blocks: List[Dict]):
         "Content-Type": "application/json"
     }
 
-    payload = {"children": blocks}
-    # 轻量重试
-    for attempt in range(3):
-        res = requests.patch(url, headers=headers, json=payload, timeout=30)
-        if res.status_code in (200, 201):
-            print("Notion push OK.")
-            return
-        print(f"Notion push failed [{res.status_code}]: {res.text}")
-        if res.status_code in (429, 500, 502, 503, 504):
-            time.sleep(2 ** attempt)
-            continue
-        break
-    raise RuntimeError("Push to Notion failed.")
+    for start in range(0, len(blocks), NOTION_BATCH_SIZE):
+        batch = blocks[start:start + NOTION_BATCH_SIZE]
+        payload = {"children": batch}
+        for attempt in range(3):
+            res = requests.patch(url, headers=headers, json=payload, timeout=30)
+            if res.status_code in (200, 201):
+                print(f"Notion push OK: blocks {start + 1}-{start + len(batch)}")
+                break
+            print(f"Notion push failed [{res.status_code}]: {res.text}")
+            if res.status_code in (429, 500, 502, 503, 504):
+                time.sleep(2 ** attempt)
+                continue
+            raise RuntimeError("Push to Notion failed.")
+        else:
+            raise RuntimeError("Push to Notion failed after retries.")
 
 
 # =========================
@@ -152,7 +158,7 @@ def notion_append_blocks(page_or_block_id: str, blocks: List[Dict]):
 # =========================
 def fetch_arxiv_papers(max_results=10) -> List[str]:
     """抓取 arXiv 最近论文（按提交时间倒序）。返回 Markdown 列表行。"""
-    base_url = "http://export.arxiv.org/api/query"
+    base_url = "https://export.arxiv.org/api/query"
     keywords = [kw.strip() for kw in QUERY_KEYWORDS.split(",") if kw.strip()]
     raw_query = " OR ".join(keywords) if keywords else "medical imaging"
     params = {
@@ -163,7 +169,16 @@ def fetch_arxiv_papers(max_results=10) -> List[str]:
         "sortOrder": "descending"
     }
     feed_url = f"{base_url}?{urlencode(params)}"
-    feed = feedparser.parse(feed_url)
+    try:
+        response = requests.get(feed_url, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"arXiv fetch failed: {exc}")
+        return ["- （arXiv 抓取失败，本次总结将只基于其它来源）"]
+
+    feed = feedparser.parse(response.text)
+    if getattr(feed, "bozo", False):
+        print(f"arXiv feed parse warning: {getattr(feed, 'bozo_exception', '')}")
 
     papers = []
     for entry in feed.entries:
@@ -171,7 +186,7 @@ def fetch_arxiv_papers(max_results=10) -> List[str]:
         date = entry.published.split("T")[0] if hasattr(entry, "published") else ""
         link = entry.link
         papers.append(f"- [{date}] {title} ({link})")
-    return papers
+    return papers or ["- （近30天未抓到相关 arXiv 论文）"]
 
 
 def fetch_ccf_a_papers(max_results_per_venue=3, max_total=12) -> List[str]:
@@ -233,7 +248,7 @@ def generate_summary_from_papers(arxiv_papers: List[str], ccf_a_papers: List[str
     for attempt in range(3):
         try:
             resp = client.chat.completions.create(
-                model="deepseek-reasoner",  # 或 "deepseek-reasoner"
+                model=DEEPSEEK_MODEL,
                 messages=[
                     {"role": "system", "content": "你是一位专业的AI算法和大模型研究分析助手"},
                     {"role": "user", "content": prompt}
