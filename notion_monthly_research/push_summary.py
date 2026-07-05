@@ -376,7 +376,6 @@ This module intentionally contains only generic helper functions.
 No business logic should be placed here.
 """
 
-from __future__ import annotations
 
 import csv
 import json
@@ -835,7 +834,6 @@ XML
 Paper objects
 """
 
-from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from typing import List
@@ -1352,7 +1350,7 @@ JSON
 Paper objects
 """
 
-from __future__ import annotations
+
 
 from datetime import datetime
 from typing import List
@@ -1628,7 +1626,7 @@ functions below so that the wording remains consistent
 throughout the project.
 """
 
-from __future__ import annotations
+
 
 from typing import List
 
@@ -1783,7 +1781,6 @@ deepseek.py
 DeepSeek API client for literature summarization.
 """
 
-from __future__ import annotations
 
 from typing import List
 
@@ -2008,7 +2005,6 @@ notion.py
 Upload literature reports to Notion.
 """
 
-from __future__ import annotations
 
 import requests
 
@@ -2329,7 +2325,7 @@ main.py
 Entry point for Kidney Literature Monitor.
 """
 
-from __future__ import annotations
+
 
 from pathlib import Path
 
