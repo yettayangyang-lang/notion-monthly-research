@@ -7,7 +7,7 @@ Data models for Kidney Literature Monitor.
 便于后续去重、AI总结、Notion写入和CSV导出。
 """
 
-from __future__ import annotations
+
 
 from dataclasses import dataclass, field
 from typing import List, Optional
